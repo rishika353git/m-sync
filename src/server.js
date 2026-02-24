@@ -25,6 +25,8 @@ function isOriginAllowed(origin) {
   if (allowedOrigins.has(origin)) return true;
   if (origin.startsWith('chrome-extension://')) return true;
   if (origin === 'https://mail.google.com') return true;
+  // Allow Vercel deployments (*.vercel.app) so preview and production URLs work without listing each
+  if (origin.endsWith('.vercel.app') && origin.startsWith('https://')) return true;
   return false;
 }
 
