@@ -1,0 +1,26 @@
+{
+  "name": "m-sync-backend",
+  "version": "1.0.0",
+  "description": "M-Sync API: Express + MySQL + JWT. GHL sync, email logging, tasks, SaaS plans.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "db:init": "node scripts/init-db.js",
+    "db:seed": "node scripts/seed-plans.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.6.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
