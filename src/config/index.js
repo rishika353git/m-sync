@@ -77,12 +77,18 @@ module.exports = {
     const rawRedirect = explicitRedirect || (baseUrl ? `${baseUrl}/api/auth/callback` : '');
     // Normalize: no trailing slash so it matches GHL Marketplace redirect URL exactly
     const redirectUri = rawRedirect ? rawRedirect.replace(/\/$/, '') : '';
+    // Use LeadConnector marketplace when your app is on leadconnectorhq.com (avoids "No integration found" on gohighlevel.com)
+    const useLeadConnector = (process.env.GHL_MARKETPLACE || '').toLowerCase() === 'leadconnector';
+    const chooselocationBase = useLeadConnector
+      ? 'https://marketplace.leadconnectorhq.com/oauth/chooselocation'
+      : 'https://marketplace.gohighlevel.com/oauth/chooselocation';
     return {
       clientId,
       clientSecret: process.env.GHL_CLIENT_SECRET || '',
       redirectUri,
       appId,
       installationUrl,
+      chooselocationBase,
     };
   })(),
 };
