@@ -161,11 +161,24 @@ const listenUrl = config.nodeEnv === 'production' && config.backendBaseUrl
   ? config.backendBaseUrl
   : `http://localhost:${PORT}`;
 
-Promise.all([ensureSyncLogsTable(), ensureFeatureFlagsTable(), ensureApiKeysTable()]).then(() => {
+async function start() {
+  try {
+    await db.testConnection();
+    console.log('[server] Database connection OK');
+  } catch (err) {
+    console.error('[server] Database connection failed:', err.code || '', err.message);
+    if (process.env.DB_SSL === 'true') {
+      console.error('[server] TiDB Cloud: ensure DB_SSL=true, DB_PORT=4000, correct DB_HOST/DB_USER/DB_PASSWORD/DB_NAME, and IP allowlist.');
+    }
+    throw err;
+  }
+  await Promise.all([ensureSyncLogsTable(), ensureFeatureFlagsTable(), ensureApiKeysTable()]);
   app.listen(PORT, () => {
     console.log(`M-Sync API running on ${listenUrl}`);
   });
-}).catch((err) => {
+}
+
+start().catch((err) => {
   console.error('Startup failed:', err);
   process.exit(1);
 });
