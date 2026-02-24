@@ -30,6 +30,15 @@ function isOriginAllowed(origin) {
   return false;
 }
 
+/** Set CORS headers on response so error (404/500) responses are readable by the browser */
+function setCorsOnResponse(req, res) {
+  const origin = req.headers.origin;
+  if (origin && isOriginAllowed(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+}
+
 // Handle preflight (OPTIONS) first so extension always gets CORS headers
 app.options('*', (req, res) => {
   const origin = req.headers.origin;
@@ -80,14 +89,16 @@ app.use('/api/signature', signatureRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/plans', plansRoutes);
 
-// 404
+// 404 – always send CORS so client can read the response
 app.use((req, res) => {
+  setCorsOnResponse(req, res);
   res.status(404).json({ error: 'Not found' });
 });
 
-// Error handler
+// Error handler – always send CORS so 500 responses don't appear as "CORS blocked"
 app.use((err, req, res, next) => {
   console.error(err);
+  setCorsOnResponse(req, res);
   res.status(500).json({ error: 'Server error' });
 });
 
@@ -156,6 +167,29 @@ async function ensureApiKeysTable() {
   }
 }
 
+async function ensureSyncedEmailsTable() {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS synced_emails (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        gmail_message_id VARCHAR(255) NOT NULL,
+        ghl_contact_id VARCHAR(100) DEFAULT NULL,
+        subject VARCHAR(500) DEFAULT NULL,
+        synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        UNIQUE KEY uq_user_gmail (user_id, gmail_message_id)
+      )
+    `);
+    await db.query('CREATE INDEX idx_synced_emails_user ON synced_emails(user_id)').catch(() => {});
+    await db.query('CREATE INDEX idx_synced_emails_gmail ON synced_emails(gmail_message_id)').catch(() => {});
+    // Add email_body if missing (older schema)
+    await db.query('ALTER TABLE synced_emails ADD COLUMN email_body TEXT DEFAULT NULL AFTER subject').catch(() => {});
+  } catch (err) {
+    console.warn('[server] ensureSyncedEmailsTable:', err.message);
+  }
+}
+
 const PORT = config.port;
 const listenUrl = config.nodeEnv === 'production' && config.backendBaseUrl
   ? config.backendBaseUrl
@@ -172,7 +206,7 @@ async function start() {
     }
     throw err;
   }
-  await Promise.all([ensureSyncLogsTable(), ensureFeatureFlagsTable(), ensureApiKeysTable()]);
+  await Promise.all([ensureSyncLogsTable(), ensureFeatureFlagsTable(), ensureApiKeysTable(), ensureSyncedEmailsTable()]);
   app.listen(PORT, () => {
     console.log(`M-Sync API running on ${listenUrl}`);
   });
