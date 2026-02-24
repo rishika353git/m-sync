@@ -416,7 +416,17 @@ router.post('/login', async (req, res) => {
     res.json({ user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role, credits_remaining: user.credits_remaining }, token });
   } catch (err) {
     console.error('Login error:', err.message || err, err.code || '');
-    const msg = process.env.NODE_ENV === 'production' ? 'Login failed' : (err.message || 'Login failed');
+    const code = err.code || '';
+    const isDbError = /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ER_|EAI_/.test(code) || (err.message && /connect|ECONNREFUSED|ETIMEDOUT|table|database/i.test(err.message));
+    const isJwtError = /secret|jwt|sign/i.test(err.message || '');
+    let msg = 'Login failed';
+    if (process.env.NODE_ENV !== 'production') {
+      msg = err.message || msg;
+    } else if (isDbError) {
+      msg = 'Login failed. Backend cannot reach the database. Check Render env (DB_*, TiDB IP allow list) and logs.';
+    } else if (isJwtError) {
+      msg = 'Login failed. Check JWT_SECRET is set on Render.';
+    }
     res.status(500).json({ error: msg });
   }
 });
