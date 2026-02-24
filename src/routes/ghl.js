@@ -81,8 +81,8 @@ fetch(u, { headers: { "ngrok-skip-browser-warning": "1" }, redirect: "manual" })
     console.log('[GHL connect] Step 2 FAIL: Missing GHL_CLIENT_ID or GHL_REDIRECT_URI');
     return res.redirect(`${config.frontendUrl}/dashboard?ghl=error&msg=${encodeURIComponent('Set GHL_CLIENT_ID, GHL_REDIRECT_URI')}`);
   }
-  console.log('[GHL connect] Step 2: Using built chooselocation URL (client_id only; do not send appId – avoids "No integration found")');
-  const base = 'https://marketplace.gohighlevel.com/oauth/chooselocation';
+  const base = config.ghl?.chooselocationBase || 'https://marketplace.gohighlevel.com/oauth/chooselocation';
+  console.log('[GHL connect] Step 2: Using built chooselocation URL', base, '(client_id only)');
   const params = {
     response_type: 'code',
     client_id: config.ghl.clientId,
