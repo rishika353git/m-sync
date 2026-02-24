@@ -415,7 +415,7 @@ router.post('/login', async (req, res) => {
     delete user.password_hash;
     res.json({ user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role, credits_remaining: user.credits_remaining }, token });
   } catch (err) {
-    console.error('Login error:', err);
+    console.error('Login error:', err.message || err, err.code || '');
     const msg = process.env.NODE_ENV === 'production' ? 'Login failed' : (err.message || 'Login failed');
     res.status(500).json({ error: msg });
   }
