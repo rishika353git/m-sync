@@ -167,6 +167,28 @@ async function ensureApiKeysTable() {
   }
 }
 
+async function ensureGhlConnectionsTable() {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ghl_connections (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL UNIQUE,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT DEFAULT NULL,
+        location_id VARCHAR(100) DEFAULT NULL,
+        subdomain VARCHAR(100) DEFAULT NULL,
+        token_expires_at TIMESTAMP NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+    await db.query('CREATE INDEX idx_ghl_connections_user ON ghl_connections(user_id)').catch(() => {});
+  } catch (err) {
+    console.warn('[server] ensureGhlConnectionsTable:', err.message);
+  }
+}
+
 async function ensureSyncedEmailsTable() {
   try {
     await db.query(`
@@ -206,7 +228,13 @@ async function start() {
     }
     throw err;
   }
-  await Promise.all([ensureSyncLogsTable(), ensureFeatureFlagsTable(), ensureApiKeysTable(), ensureSyncedEmailsTable()]);
+  await Promise.all([
+    ensureSyncLogsTable(),
+    ensureFeatureFlagsTable(),
+    ensureApiKeysTable(),
+    ensureGhlConnectionsTable(),
+    ensureSyncedEmailsTable(),
+  ]);
   app.listen(PORT, () => {
     console.log(`M-Sync API running on ${listenUrl}`);
   });
