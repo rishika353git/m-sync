@@ -81,8 +81,8 @@ fetch(u, { headers: { "ngrok-skip-browser-warning": "1" }, redirect: "manual" })
     console.log('[GHL connect] Step 2 FAIL: Missing GHL_CLIENT_ID or GHL_REDIRECT_URI');
     return res.redirect(`${config.frontendUrl}/dashboard?ghl=error&msg=${encodeURIComponent('Set GHL_CLIENT_ID, GHL_REDIRECT_URI')}`);
   }
-  const base = config.ghl?.chooselocationBase || 'https://marketplace.gohighlevel.com/oauth/chooselocation';
-  console.log('[GHL connect] Step 2: Using built chooselocation URL', base, '(client_id only)');
+  console.log('[GHL connect] Step 2: Using built chooselocation URL for app', appId, '(add this app’s redirect URL in GHL Marketplace → Auth)');
+  const base = 'https://marketplace.gohighlevel.com/oauth/chooselocation';
   const params = {
     response_type: 'code',
     client_id: config.ghl.clientId,
@@ -90,11 +90,14 @@ fetch(u, { headers: { "ngrok-skip-browser-warning": "1" }, redirect: "manual" })
     scope: 'contacts.readonly contacts.write locations.readonly businesses.readonly users.readonly products.readonly',
     state,
   };
-  // Do NOT add appId here: GHL often returns "No integration found with the id: xxx" when appId is sent.
-  // client_id alone is enough for chooselocation. Only set GHL_INSTALLATION_URL from Marketplace for custom flow.
+  if (config.ghl.appId) params.appId = config.ghl.appId;
   console.log('[GHL connect] Step 3: Redirecting to GHL (built URL)');
   res.redirect(`${base}?${new URLSearchParams(params).toString()}`);
 });
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 async function withGhlRetry(req, res, fn) {
   const userId = req.user.id;
@@ -111,14 +114,21 @@ async function withGhlRetry(req, res, fn) {
   }
   const refreshResult = await ghlTokenService.refreshIfNeeded(userId, { forceRefresh: true });
   const newToken = refreshResult?.accessToken ?? null;
-    if (newToken) {
-      out = await fn(newToken);
-      if (isGhlUnauthorized(out.res, out.data)) {
-        await ghlTokenService.disconnect(userId, 'GHL API returned 401 and refresh failed after retry. Reconnect in the dashboard.');
-        return res.status(401).json({ error: GHL_SESSION_EXPIRED_MSG });
-      }
+  if (newToken) {
+    out = await fn(newToken);
+    if (!isGhlUnauthorized(out.res, out.data)) {
       return res.status(out.res.status).json(out.data);
     }
+    // Retry still 401 – GHL may need a moment for the new token to propagate. Retry once after delay.
+    await sleep(1500);
+    out = await fn(newToken);
+    if (!isGhlUnauthorized(out.res, out.data)) {
+      return res.status(out.res.status).json(out.data);
+    }
+    // Do NOT disconnect – keep tokens; may be propagation delay. Return 401 so user can retry or reconnect manually.
+    console.warn('[GHL withGhlRetry] userId', userId, 'retry returned 401 after refresh – returning 401 without disconnect (tokens kept; user may retry)');
+    return res.status(401).json({ error: GHL_SESSION_EXPIRED_MSG });
+  }
   await ghlTokenService.disconnect(userId, 'GHL API returned 401 and refresh failed. Reconnect in the dashboard; check Redirect URL in GHL Marketplace.');
   return res.status(401).json({ error: GHL_SESSION_EXPIRED_MSG });
 }
@@ -139,26 +149,25 @@ router.get('/status', requireAuth, async (req, res) => {
     });
     const probeData = await probe.json().catch(() => ({}));
     if (probe.status === 401 || (probe.ok === false && probeData?.message && /unauthorized|invalid|expired/i.test(String(probeData.message)))) {
-      // If connection was just saved (e.g. user landed back from OAuth), don't try refresh yet –
-      // GHL may return 401 for a brand-new token briefly, and refresh often returns "Invalid refresh token"
-      // right after issue. Skip refresh and return connected so the dashboard shows Connected.
+      // Probe failed – try refresh to fix the token. GHL may return 401 for new tokens briefly (propagation delay).
       const tokensBeforeRefresh = await ghlTokenService.getTokens(userId);
       const updatedAt = tokensBeforeRefresh?.updatedAt != null ? Number(tokensBeforeRefresh.updatedAt) : 0;
       const connectionAgeMs = Date.now() - updatedAt;
       const FRESH_CONNECTION_MS = 2 * 60 * 1000; // 2 minutes
-      if (connectionAgeMs < FRESH_CONNECTION_MS) {
-        console.log('[GHL status] probe failed but connection is fresh (saved', Math.round(connectionAgeMs / 1000), 's ago) – skipping refresh, returning connected');
-        return res.json({ status: 'connected', connected: true, location_id: locationId });
-      }
       const refreshResult = await ghlTokenService.refreshIfNeeded(userId, { forceRefresh: true });
       const newToken = refreshResult?.accessToken ?? null;
-      if (!newToken) {
-        const msg = 'Status probe got 401 from GHL and refresh failed (invalid refresh token). Disconnect and reconnect in the dashboard; check Redirect URL in GHL Marketplace.';
-        await ghlTokenService.disconnect(userId, msg);
-        return res.json({ status: 'disconnected', connected: false, location_id: null, disconnect_reason: msg });
+      if (newToken) {
+        const updated = await ghlTokenService.getValidToken(userId);
+        return res.json({ status: 'connected', connected: true, location_id: updated?.locationId ?? locationId });
       }
-      const updated = await ghlTokenService.getValidToken(userId);
-      return res.json({ status: 'connected', connected: true, location_id: updated?.locationId ?? locationId });
+      // Refresh failed – for fresh connections, don't disconnect (token may propagate shortly)
+      if (connectionAgeMs < FRESH_CONNECTION_MS) {
+        console.log('[GHL status] probe failed, refresh failed, connection fresh – returning connected optimistically');
+        return res.json({ status: 'connected', connected: true, location_id: locationId });
+      }
+      const msg = 'Status probe got 401 from GHL and refresh failed (invalid refresh token). Disconnect and reconnect in the dashboard; check Redirect URL in GHL Marketplace.';
+      await ghlTokenService.disconnect(userId, msg);
+      return res.json({ status: 'disconnected', connected: false, location_id: null, disconnect_reason: msg });
     }
     if (!probe.ok) {
       // Non-401 error (e.g. 500, rate limit): still report connected; token might be fine
@@ -360,9 +369,10 @@ router.get('/contacts/:email', requireAuth, async (req, res) => {
         }
         return res.status(r.status).json(retryData);
       }
-      await ghlTokenService.disconnect(userId, 'Load contact got 401 from GHL and refresh failed after retry. Reconnect in the dashboard.');
+      console.warn('[GHL contacts] userId', userId, 'retry returned 401 – returning 401 without disconnect');
       return res.status(401).json({ error: GHL_SESSION_EXPIRED_MSG });
     }
+    console.warn('[GHL contacts] userId', userId, 'refresh failed (invalid token) – disconnecting');
     await ghlTokenService.disconnect(userId, 'Load contact got 401 from GHL and refresh failed (invalid refresh token). Reconnect in the dashboard; ensure Redirect URL in GHL Marketplace matches your backend.');
     console.log('[GHL contacts] returned 401 session expired for userId:', userId);
     return res.status(401).json({ error: GHL_SESSION_EXPIRED_MSG });
@@ -400,9 +410,10 @@ router.get('/contacts/:contactId/profile', requireAuth, async (req, res) => {
       const contact2 = await c2.json();
       const tasks2 = t2.ok ? await t2.json() : { tasks: [] };
       if (!isGhlUnauthorized(c2, contact2)) return res.json({ contact: contact2, tasks: injectContactId(tasks2.tasks || tasks2) });
-      await ghlTokenService.disconnect(userId, 'Profile request got 401 from GHL and refresh failed. Reconnect in the dashboard.');
+      console.warn('[GHL profile] userId', userId, 'retry returned 401 – returning 401 without disconnect');
       return res.status(401).json({ error: GHL_SESSION_EXPIRED_MSG });
     }
+    console.warn('[GHL profile] userId', userId, 'refresh failed – disconnecting');
     await ghlTokenService.disconnect(userId, 'Profile request got 401 from GHL and refresh failed. Reconnect in the dashboard.');
     return res.status(401).json({ error: GHL_SESSION_EXPIRED_MSG });
   } catch (err) {
@@ -485,11 +496,11 @@ router.post('/contacts/:contactId/notes', requireAuth, async (req, res) => {
       const { locationId } = await ghlTokenService.getValidToken(req.user.id);
       const { contactId } = req.params;
       const r = await ghlFetch(
-        `https://services.leadconnectorhq.com/contacts/${contactId}/notes`,
+        `https://services.leadconnectorhq.com/contacts/${contactId}/notes?locationId=${encodeURIComponent(locationId)}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ locationId, body: body.trim() }),
+          body: JSON.stringify({ body: body.trim() }),
         }
       );
       const data = await r.json().catch(() => ({}));
@@ -518,6 +529,79 @@ router.get('/contacts/:contactId/opportunities', requireAuth, async (req, res) =
   } catch (err) {
     console.error('[GHL opportunities] error', err);
     res.status(500).json({ error: 'Failed to fetch opportunities' });
+  }
+});
+
+// GET /api/ghl/pipelines – list opportunity pipelines + stages for the user's location
+router.get('/pipelines', requireAuth, async (req, res) => {
+  try {
+    return await withGhlRetry(req, res, async (token) => {
+      const { locationId } = await ghlTokenService.getValidToken(req.user.id);
+      const r = await ghlFetch(
+        `https://services.leadconnectorhq.com/opportunities/pipelines?locationId=${encodeURIComponent(locationId)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await r.json().catch(() => ({}));
+      const list = data?.pipelines ?? data?.pipelines?.pipelines ?? data?.data?.pipelines ?? data?.data ?? data;
+      const pipelines = (Array.isArray(list) ? list : []).map((p) => {
+        const stagesRaw = p?.stages ?? p?.pipelineStages ?? p?.stages?.stages ?? [];
+        const stages = (Array.isArray(stagesRaw) ? stagesRaw : []).map((s) => ({
+          id: s?.id ?? s?._id ?? s?.stageId ?? s?.opportunityStageId,
+          name: s?.name ?? s?.title ?? s?.label ?? 'Stage',
+        })).filter((s) => s.id);
+        return {
+          id: p?.id ?? p?._id ?? p?.pipelineId,
+          name: p?.name ?? p?.title ?? 'Pipeline',
+          stages,
+        };
+      }).filter((p) => p.id);
+      return { res: r, data: { pipelines } };
+    });
+  } catch (err) {
+    console.error('[GHL pipelines] error', err);
+    res.status(500).json({ error: 'Failed to fetch pipelines' });
+  }
+});
+
+// POST /api/ghl/opportunities – create an opportunity/deal for a contact
+router.post('/opportunities', requireAuth, async (req, res) => {
+  try {
+    const contactId = req.body?.contactId ?? req.body?.contact_id;
+    const pipelineId = req.body?.pipelineId ?? req.body?.pipeline_id;
+    const stageId = req.body?.stageId ?? req.body?.stage_id;
+    const name = (req.body?.name ?? req.body?.title ?? '').trim();
+    const monetaryValueRaw = req.body?.monetaryValue ?? req.body?.value ?? req.body?.amount;
+
+    if (!contactId || !pipelineId || !stageId || !name) {
+      return res.status(400).json({ error: 'contactId, pipelineId, stageId, and name are required' });
+    }
+    const monetaryValue = monetaryValueRaw == null || monetaryValueRaw === '' ? undefined : Number(monetaryValueRaw);
+    if (monetaryValueRaw != null && monetaryValueRaw !== '' && Number.isNaN(monetaryValue)) {
+      return res.status(400).json({ error: 'monetaryValue must be a number' });
+    }
+
+    return await withGhlRetry(req, res, async (token) => {
+      const { locationId } = await ghlTokenService.getValidToken(req.user.id);
+      const body = {
+        locationId,
+        contactId,
+        pipelineId,
+        stageId,
+        name,
+        status: 'open',
+      };
+      if (monetaryValue !== undefined) body.monetaryValue = monetaryValue;
+      const r = await ghlFetch('https://services.leadconnectorhq.com/opportunities/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      return { res: r, data };
+    });
+  } catch (err) {
+    console.error('[GHL create opportunity] error', err);
+    res.status(500).json({ error: 'Failed to create opportunity' });
   }
 });
 
@@ -862,14 +946,275 @@ router.get('/documents', requireAuth, async (req, res) => {
   }
 });
 
+// Build note body for GHL (email subject, body, timestamp, direction) – used when syncing email to contact
+function buildEmailNoteBody(subject, emailBody, direction = 'incoming') {
+  const lines = [];
+  if (subject) lines.push(`Subject: ${subject}`);
+  lines.push(`Date: ${new Date().toISOString()}`);
+  lines.push(`Direction: ${direction}`);
+  lines.push('');
+  lines.push(emailBody ? String(emailBody).trim() : '(No body)');
+  return lines.join('\n');
+}
+
 router.post('/sync-email', requireAuth, async (req, res) => {
   const [user] = await db.query('SELECT credits_remaining FROM users WHERE id = ?', [req.user.id]);
   if (!user || user.credits_remaining < 1) return res.status(402).json({ error: 'Insufficient credits' });
-  const { gmail_message_id, ghl_contact_id, subject, email_body, reply_only } = req.body;
+
+  let {
+    gmail_message_id,
+    ghl_contact_id,
+    subject,
+    email_body,
+    reply_only,
+    contact_email,
+    contact_name,
+    contact_phone,
+  } = req.body;
+
   if (!gmail_message_id) return res.status(400).json({ error: 'gmail_message_id required' });
-  // reply_only: when true, email_body is treated as the single reply message (not full thread)
+
+  // High-level start log so we can trace every Save to CRM attempt end-to-end
+  console.log('[GHL sync-email] START', {
+    userId: req.user.id,
+    gmail_message_id,
+    contact_email: contact_email || null,
+    reply_only: !!reply_only,
+    subject_present: !!subject,
+  });
+
+  // Normalize email
+  contact_email = (contact_email || '').trim().toLowerCase();
+
+  // 1. Duplicate check: do not deduct or create note twice
+  const existingRows = await db.query(
+    'SELECT id FROM synced_emails WHERE user_id = ? AND gmail_message_id = ?',
+    [req.user.id, gmail_message_id]
+  );
+  if (existingRows && existingRows.length > 0) {
+    console.log('[GHL sync-email] DUPLICATE', {
+      userId: req.user.id,
+      gmail_message_id,
+      existing_id: existingRows[0]?.id ?? null,
+    });
+    logSyncAttempt(req.user.id, gmail_message_id, ghl_contact_id || null, subject || null, 'Duplicate (already synced)');
+    return res.json({ ok: true, credits_remaining: user.credits_remaining, message: 'Already synced this email.' });
+  }
+
+  const direction = reply_only ? 'outgoing' : 'incoming';
+
+  // 2. Ensure we have a CRM contact ID. Never proceed without one.
+  try {
+    const { accessToken: token, locationId } = await ghlTokenService.getValidToken(req.user.id);
+    if (!token || !locationId) {
+      const reason = ghlTokenService.getDisconnectReason(req.user.id);
+      console.error(
+        '[GHL sync-email] FAILED missing token/location',
+        'userId=',
+        req.user.id,
+        'disconnectReason=',
+        reason || 'none',
+        '| CRM row may have been deleted by another request (401/refresh-fail). Check logs above for [GHL] disconnected user.'
+      );
+      return res.status(502).json({ error: 'CRM connection is not available. Please reconnect and try again.' });
+    }
+
+    // If no contact id but we have an email, try to resolve from CRM
+    if (!ghl_contact_id && contact_email) {
+      try {
+        const searchBody = { locationId, pageLimit: 50 };
+        console.log('[GHL sync-email] CONTACT_LOOKUP_START', {
+          userId: req.user.id,
+          gmail_message_id,
+          contact_email,
+          locationId,
+          url: 'https://services.leadconnectorhq.com/contacts/search',
+          body: searchBody,
+        });
+        const r = await ghlFetch('https://services.leadconnectorhq.com/contacts/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify(searchBody),
+        });
+        const data = await r.json().catch(() => ({}));
+        const list = Array.isArray(data.contacts) ? data.contacts : [];
+        const lower = contact_email;
+        const match = list.find((c) => {
+          const raw = c?.email ?? c?.contact?.email ?? c?.contact?.emails?.[0];
+          const val =
+            typeof raw === 'string'
+              ? raw
+              : raw && typeof raw === 'object'
+              ? raw.value ?? raw.address ?? raw.email
+              : null;
+          return val && String(val).toLowerCase() === lower;
+        });
+        const foundId =
+          match?.id ??
+          match?.contactId ??
+          match?.contact_id ??
+          match?.contact?.id ??
+          match?.contact?.contactId ??
+          null;
+        if (foundId) {
+          ghl_contact_id = String(foundId);
+          console.log('[GHL sync-email] CONTACT_LOOKUP_SUCCESS', {
+            userId: req.user.id,
+            gmail_message_id,
+            contact_email,
+            ghl_contact_id,
+          });
+        } else {
+          console.log('[GHL sync-email] CONTACT_LOOKUP_EMPTY', {
+            userId: req.user.id,
+            gmail_message_id,
+            contact_email,
+            contacts_count: list.length,
+          });
+        }
+      } catch (searchErr) {
+        console.warn(
+          '[GHL sync-email] CONTACT_LOOKUP_ERROR',
+          'userId=',
+          req.user.id,
+          'email=',
+          contact_email,
+          searchErr.message || searchErr
+        );
+      }
+    }
+
+    // If still no contact, create one (best-effort) so every sync has a CRM contact
+    if (!ghl_contact_id && contact_email) {
+      try {
+        const body = {
+          locationId,
+          email: contact_email,
+          firstName: contact_name || undefined,
+          phone: contact_phone || undefined,
+        };
+        console.log('[GHL sync-email] CONTACT_CREATE_START', {
+          userId: req.user.id,
+          gmail_message_id,
+          contact_email,
+          body,
+          url: 'https://services.leadconnectorhq.com/contacts/',
+        });
+        const r = await ghlFetch('https://services.leadconnectorhq.com/contacts/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json().catch(() => ({}));
+        const newId =
+          data?.id ??
+          data?.contact?.id ??
+          data?.data?.id ??
+          data?.data?.contact?.id ??
+          null;
+        if (!r.ok || !newId) {
+          console.error(
+            '[GHL sync-email] CONTACT_CREATE_FAILED',
+            'userId=',
+            req.user.id,
+            'status=',
+            r.status,
+            'response=',
+            JSON.stringify(data).slice(0, 300)
+          );
+          return res.status(502).json({ error: 'Could not create contact in CRM. Please try again.' });
+        }
+        ghl_contact_id = String(newId);
+        console.log('[GHL sync-email] CONTACT_CREATE_SUCCESS', {
+          userId: req.user.id,
+          gmail_message_id,
+          contact_email,
+          ghl_contact_id,
+        });
+      } catch (createErr) {
+        console.error(
+          '[GHL sync-email] CONTACT_CREATE_ERROR',
+          'userId=',
+          req.user.id,
+          'email=',
+          contact_email,
+          createErr.message || createErr
+        );
+        return res.status(502).json({ error: 'Could not create contact in CRM. Please try again.' });
+      }
+    }
+
+    if (!ghl_contact_id) {
+      console.error('[GHL sync-email] FAILED_NO_CONTACT_ID', {
+        userId: req.user.id,
+        gmail_message_id,
+        contact_email,
+      });
+      return res.status(400).json({ error: 'Could not resolve CRM contact for this email.' });
+    }
+
+    // 3. Create a note in CRM. Do NOT deduct credits if this fails.
+    try {
+      const noteBody = buildEmailNoteBody(subject || '', email_body || '', direction);
+      console.log('[GHL sync-email] NOTE_CREATE_START', {
+        userId: req.user.id,
+        gmail_message_id,
+        ghl_contact_id,
+        locationId,
+        note_length: noteBody.length,
+        endpoint: `https://services.leadconnectorhq.com/contacts/${ghl_contact_id}/notes?locationId=${encodeURIComponent(
+          locationId
+        )}`,
+      });
+      const r = await ghlFetch(
+        `https://services.leadconnectorhq.com/contacts/${ghl_contact_id}/notes?locationId=${encodeURIComponent(locationId)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ body: noteBody }),
+        }
+      );
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        const msg = data?.message || data?.error || `CRM API ${r.status}`;
+        console.error(
+          '[GHL sync-email] NOTE_CREATE_FAILED',
+          'userId=',
+          req.user.id,
+          'status=',
+          r.status,
+          'message=',
+          msg,
+          'responseKeys=',
+          Object.keys(data || {})
+        );
+        logSyncAttempt(req.user.id, gmail_message_id, ghl_contact_id, subject, `CRM note failed: ${msg}`);
+        return res.status(502).json({ error: 'Could not save email to CRM. Try again or check connection.' });
+      }
+      console.log('[GHL sync-email] NOTE_CREATE_SUCCESS', {
+        userId: req.user.id,
+        gmail_message_id,
+        ghl_contact_id,
+        status: 'ok',
+      });
+    } catch (noteErr) {
+      console.error('[GHL sync-email] NOTE_CREATE_ERROR', 'userId=', req.user.id, noteErr.message || noteErr);
+      logSyncAttempt(req.user.id, gmail_message_id, ghl_contact_id, subject, noteErr.message || 'CRM error');
+      return res.status(502).json({ error: 'Could not save email to CRM. Try again later.' });
+    }
+  } catch (resolveErr) {
+    console.error('[GHL sync-email] CONTACT_RESOLUTION_ERROR', 'userId=', req.user.id, resolveErr.message || resolveErr);
+    return res.status(502).json({ error: 'Could not reach CRM. Try again later.' });
+  }
+
+  // 4. Save to M-Sync DB and deduct credit (only after CRM note succeeded)
   try {
     try {
+      console.log('[GHL sync-email] DB_INSERT_START', {
+        userId: req.user.id,
+        gmail_message_id,
+        ghl_contact_id,
+      });
       await db.query(
         'INSERT INTO synced_emails (user_id, gmail_message_id, ghl_contact_id, subject, email_body) VALUES (?, ?, ?, ?, ?)',
         [req.user.id, gmail_message_id, ghl_contact_id || null, subject || null, email_body || null]
@@ -886,18 +1231,25 @@ router.post('/sync-email', requireAuth, async (req, res) => {
     }
     await db.query('UPDATE users SET credits_remaining = credits_remaining - 1 WHERE id = ?', [req.user.id]);
     logSyncAttempt(req.user.id, gmail_message_id, ghl_contact_id, subject, null);
-    res.json({ ok: true, credits_remaining: user.credits_remaining - 1 });
+    const updatedRows = await db.query('SELECT credits_remaining FROM users WHERE id = ?', [req.user.id]);
+    const creditsRemaining =
+      updatedRows && updatedRows[0] ? updatedRows[0].credits_remaining : user.credits_remaining - 1;
+    console.log('[GHL sync-email] SUCCESS', {
+      userId: req.user.id,
+      gmail_message_id,
+      ghl_contact_id,
+      credits_remaining: creditsRemaining,
+    });
+    res.json({ ok: true, credits_remaining: creditsRemaining });
   } catch (err) {
     const isDuplicate = err.code === 'ER_DUP_ENTRY' || (err.message && /duplicate|unique/i.test(err.message));
     if (isDuplicate) {
-      console.log('[GHL sync-email] already synced (duplicate)', req.body?.gmail_message_id);
-      logSyncAttempt(req.user.id, gmail_message_id, ghl_contact_id, subject, 'Duplicate (already synced)');
+      logSyncAttempt(req.user.id, gmail_message_id, ghl_contact_id, subject, 'Duplicate (race)');
       return res.json({ ok: true, credits_remaining: user.credits_remaining, message: 'Already synced this email.' });
     }
-    console.error('[GHL sync-email] error', err);
-    const message = err.message || 'Sync failed';
-    logSyncAttempt(req.user.id, gmail_message_id, ghl_contact_id, subject, message);
-    res.status(500).json({ error: message });
+    console.error('[GHL sync-email] FAILED_DB', 'userId=', req.user.id, err);
+    logSyncAttempt(req.user.id, gmail_message_id, ghl_contact_id, subject, err.message || 'Sync failed');
+    res.status(500).json({ error: err.message || 'Sync failed' });
   }
 });
 

@@ -19,7 +19,7 @@ else if (fs.existsSync(backendEnvAlt)) require('dotenv').config({ path: backendE
 
 const corsOrigin = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
-  : ['http://localhost:5173', 'http://localhost:3000'];
+  : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:5176', 'http://localhost:3000'];
 
 module.exports = {
   port: parseInt(process.env.PORT, 10) || 4000,
@@ -77,18 +77,12 @@ module.exports = {
     const rawRedirect = explicitRedirect || (baseUrl ? `${baseUrl}/api/auth/callback` : '');
     // Normalize: no trailing slash so it matches GHL Marketplace redirect URL exactly
     const redirectUri = rawRedirect ? rawRedirect.replace(/\/$/, '') : '';
-    // Use LeadConnector marketplace when your app is on leadconnectorhq.com (avoids "No integration found" on gohighlevel.com)
-    const useLeadConnector = (process.env.GHL_MARKETPLACE || '').toLowerCase() === 'leadconnector';
-    const chooselocationBase = useLeadConnector
-      ? 'https://marketplace.leadconnectorhq.com/oauth/chooselocation'
-      : 'https://marketplace.gohighlevel.com/oauth/chooselocation';
     return {
       clientId,
       clientSecret: process.env.GHL_CLIENT_SECRET || '',
       redirectUri,
       appId,
       installationUrl,
-      chooselocationBase,
     };
   })(),
 };

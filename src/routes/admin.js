@@ -35,7 +35,7 @@ router.get('/stats', async (req, res) => {
 router.get('/users', async (req, res) => {
   try {
     const rows = await db.query(
-      `SELECT u.id, u.email, u.full_name, u.role, u.credits_remaining, u.credits_reset_at, u.created_at, p.name AS plan_name, p.slug AS plan_slug, p.id AS plan_id,
+      `SELECT u.id, u.email, u.full_name, u.role, u.credits_remaining, u.credits_reset_at, u.license_count, u.created_at, p.name AS plan_name, p.slug AS plan_slug, p.id AS plan_id,
         (SELECT COUNT(*) FROM synced_emails s WHERE s.user_id = u.id) AS synced_count,
         (SELECT MAX(s.synced_at) FROM synced_emails s WHERE s.user_id = u.id) AS last_synced_at
        FROM users u
@@ -60,9 +60,72 @@ router.get('/plans', async (req, res) => {
   }
 });
 
-// PATCH /api/admin/users/:id – update user (plan, credits, role, full_name)
+// POST /api/admin/plans – add plan
+router.post('/plans', async (req, res) => {
+  const { name, slug, credits_per_month, is_paid, price_cents } = req.body;
+  if (!name || !slug) return res.status(400).json({ error: 'name and slug required' });
+  const credits = credits_per_month != null ? parseInt(credits_per_month, 10) : 0;
+  const paid = is_paid ? 1 : 0;
+  const price = price_cents != null ? parseInt(price_cents, 10) : null;
+  try {
+    await db.query(
+      'INSERT INTO plans (name, slug, credits_per_month, is_paid, price_cents) VALUES (?, ?, ?, ?, ?)',
+      [String(name).slice(0, 50), String(slug).slice(0, 50), credits, paid, price]
+    );
+    const [row] = await db.query('SELECT * FROM plans WHERE slug = ?', [String(slug).slice(0, 50)]);
+    res.status(201).json(row);
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Plan with that name or slug already exists' });
+    console.error('Admin plans POST error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /api/admin/plans/:id – edit plan
+router.patch('/plans/:id', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Invalid plan id' });
+  const { name, slug, credits_per_month, is_paid, price_cents } = req.body;
+  const updates = [];
+  const params = [];
+  if (name !== undefined) { updates.push('name = ?'); params.push(String(name).slice(0, 50)); }
+  if (slug !== undefined) { updates.push('slug = ?'); params.push(String(slug).slice(0, 50)); }
+  if (credits_per_month !== undefined) { updates.push('credits_per_month = ?'); params.push(parseInt(credits_per_month, 10)); }
+  if (is_paid !== undefined) { updates.push('is_paid = ?'); params.push(is_paid ? 1 : 0); }
+  if (price_cents !== undefined) { updates.push('price_cents = ?'); params.push(price_cents == null ? null : parseInt(price_cents, 10)); }
+  if (updates.length === 0) return res.status(400).json({ error: 'Nothing to update' });
+  params.push(id);
+  try {
+    await db.query(`UPDATE plans SET ${updates.join(', ')} WHERE id = ?`, params);
+    const [row] = await db.query('SELECT * FROM plans WHERE id = ?', [id]);
+    if (!row) return res.status(404).json({ error: 'Plan not found' });
+    res.json(row);
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Plan with that name or slug already exists' });
+    console.error('Admin plans PATCH error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE /api/admin/plans/:id – delete plan (only if no users on it)
+router.delete('/plans/:id', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Invalid plan id' });
+  try {
+    const [count] = await db.query('SELECT COUNT(*) AS n FROM users WHERE plan_id = ?', [id]);
+    if (count?.n > 0) return res.status(400).json({ error: 'Cannot delete plan: users are on this plan' });
+    const result = await db.query('DELETE FROM plans WHERE id = ?', [id]);
+    if (result && result.affectedRows === 0) return res.status(404).json({ error: 'Plan not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Admin plans DELETE error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PATCH /api/admin/users/:id – update user (plan, credits, role, full_name, license_count)
 router.patch('/users/:id', async (req, res) => {
-  const { plan_id, credits_remaining, role, full_name } = req.body;
+  const { plan_id, credits_remaining, role, full_name, license_count } = req.body;
   const id = parseInt(req.params.id, 10);
   if (!id) return res.status(400).json({ error: 'Invalid user id' });
   try {
@@ -72,6 +135,7 @@ router.patch('/users/:id', async (req, res) => {
     if (credits_remaining !== undefined) { updates.push('credits_remaining = ?'); params.push(credits_remaining); }
     if (role !== undefined) { updates.push('role = ?'); params.push(role); }
     if (full_name !== undefined) { updates.push('full_name = ?'); params.push(full_name); }
+    if (license_count !== undefined) { updates.push('license_count = ?'); params.push(Math.max(1, parseInt(license_count, 10) || 1)); }
     if (updates.length === 0) return res.status(400).json({ error: 'Nothing to update' });
     params.push(id);
     await db.query(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, params);
@@ -82,20 +146,7 @@ router.patch('/users/:id', async (req, res) => {
   }
 });
 
-// DELETE /api/admin/users/:id – delete user (and cascade: ghl_connections, synced_emails)
-router.delete('/users/:id', async (req, res) => {
-  const id = parseInt(req.params.id, 10);
-  if (!id) return res.status(400).json({ error: 'Invalid user id' });
-  if (id === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself' });
-  try {
-    const result = await db.query('DELETE FROM users WHERE id = ?', [id]);
-    if (result && result.affectedRows === 0) return res.status(404).json({ error: 'User not found' });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('Admin delete user error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
+// User delete removed: admin has view-only access for users (edit plan/credits only).
 
 // GET /api/admin/synced-emails – list all synced emails (all users)
 router.get('/synced-emails', async (req, res) => {
@@ -230,6 +281,25 @@ router.delete('/api-keys/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('Admin api-keys DELETE error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/admin/purchases – list purchases (user email, plan name, quantity, date, status)
+router.get('/purchases', async (req, res) => {
+  try {
+    const rows = await db.query(
+      `SELECT pr.id, pr.user_id, pr.plan_id, pr.quantity, pr.amount_cents, pr.stripe_session_id, pr.status, pr.created_at,
+              u.email AS user_email,
+              p.name AS plan_name
+       FROM purchases pr
+       JOIN users u ON pr.user_id = u.id
+       JOIN plans p ON pr.plan_id = p.id
+       ORDER BY pr.created_at DESC`
+    );
+    res.json(rows || []);
+  } catch (err) {
+    console.error('Admin purchases GET error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });

@@ -15,7 +15,19 @@ router.use(requireAuth);
 router.get('/profile', async (req, res) => {
   try {
     const [row] = await db.query(
-      `SELECT u.id, u.email, u.full_name, u.role, u.credits_remaining, u.credits_reset_at, p.name AS plan_name, p.slug AS plan_slug, p.credits_per_month
+      `SELECT u.id,
+              u.email,
+              u.full_name,
+              u.role,
+              u.credits_remaining,
+              u.credits_reset_at,
+              u.license_count,
+              u.stripe_customer_id,
+              u.stripe_subscription_id,
+              u.subscription_status,
+              p.name AS plan_name,
+              p.slug AS plan_slug,
+              p.credits_per_month
        FROM users u
        LEFT JOIN plans p ON u.plan_id = p.id
        WHERE u.id = ?`,

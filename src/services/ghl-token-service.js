@@ -202,7 +202,11 @@ async function refreshIfNeeded(userId, opts = {}) {
 
 async function getValidToken(userId) {
   const tokens = await getTokens(userId);
-  if (!tokens) return { accessToken: null, locationId: null };
+  if (!tokens) {
+    const reason = getDisconnectReason(userId);
+    console.log('[GHL getValidToken] userId', userId, 'no tokens in DB', reason ? `(last disconnect: ${reason})` : '(never connected or row deleted)');
+    return { accessToken: null, locationId: null };
+  }
   const now = Date.now();
   const inCooldown = tokens.updatedAt != null && now - tokens.updatedAt < REFRESH_COOLDOWN_MS;
   const expired = tokens.expiresAt != null && tokens.expiresAt - TOKEN_EXPIRY_BUFFER_MS <= now;
@@ -218,6 +222,7 @@ async function getValidToken(userId) {
       }
       return { accessToken: refreshResult.accessToken, locationId: locationId ?? tokens.locationId };
     }
+    console.log('[GHL getValidToken] userId', userId, 'token expired, refresh failed – returning null');
     return { accessToken: null, locationId: null };
   }
   let locationId = tokens.locationId;
@@ -235,7 +240,7 @@ async function getValidToken(userId) {
 async function disconnect(userId, reason) {
   await db.query('DELETE FROM ghl_connections WHERE user_id = ?', [userId]);
   if (reason) lastDisconnectReasons.set(userId, reason);
-  console.log('[GHL] disconnected user', userId, reason ? 'reason: ' + reason : '');
+  console.log('[GHL] disconnected user', userId, reason ? 'reason: ' + reason : '', '(stack trace available in dev)');
 }
 
 function getDisconnectReason(userId) {
