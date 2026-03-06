@@ -319,8 +319,14 @@ async function withDeadlockRetry(fn, maxRetries = 6) {
   }
 }
 
+async function columnExists(table, column) {
+  const rows = await db.query(`SHOW COLUMNS FROM ${table} LIKE ?`, [column]);
+  return Array.isArray(rows) && rows.length > 0;
+}
+
 async function ensureLicenseCountColumn() {
   try {
+    if (await columnExists('users', 'license_count')) return;
     await withDeadlockRetry(() =>
       db.query('ALTER TABLE users ADD COLUMN license_count INT NOT NULL DEFAULT 1 AFTER credits_reset_at')
     );
@@ -362,6 +368,7 @@ async function ensureStripeColumnsOnUsers() {
   ];
   for (const [name, sql] of alters) {
     try {
+      if (await columnExists('users', name === 'status' ? 'subscription_status' : name)) continue;
       await withDeadlockRetry(() => db.query(sql));
     } catch (err) {
       if (err.code !== 'ER_DUP_FIELDNAME') console.warn('[server] ensureStripeColumnsOnUsers (' + name + '):', err.message);
