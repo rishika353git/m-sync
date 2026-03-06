@@ -2,6 +2,7 @@
  * M-Sync API server.
  * Entry point: starts Express, mounts routes, enables CORS.
  */
+console.log('[server] Loading', require('path').resolve(__dirname, 'server.js'));
 
 const express = require('express');
 const cors = require('cors');
@@ -387,10 +388,13 @@ const listenUrl = config.nodeEnv === 'production' && config.backendBaseUrl
 
 // Run all migrations strictly in order so base tables always exist before dependent ones.
 (async function runStartupMigrations() {
-  console.log('[server] Ensuring database and tables...');
+  console.log('[server] Ensuring database and tables... (migrations run in order)');
   await ensureDatabase();
+  console.log('[server] Step 1/3: plans');
   await ensurePlansTable();
+  console.log('[server] Step 2/3: users');
   await ensureUsersTable();
+  console.log('[server] Step 3/3: ghl_connections');
   await ensureGhlConnectionsTable();
   console.log('[server] Base schema OK (plans, users, ghl_connections)');
   await ensureSyncedEmailsTable();
