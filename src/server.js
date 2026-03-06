@@ -305,14 +305,14 @@ async function ensurePurchasesTable() {
 }
 
 /** Run a function, retrying on MySQL deadlock (ER_LOCK_DEADLOCK / 1213). */
-async function withDeadlockRetry(fn, maxRetries = 3) {
+async function withDeadlockRetry(fn, maxRetries = 6) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
       const isDeadlock = err.code === 'ER_LOCK_DEADLOCK' || err.errno === 1213;
       if (!isDeadlock || attempt === maxRetries) throw err;
-      const delay = 50 * attempt + Math.random() * 100;
+      const delay = 200 * attempt + Math.random() * 300;
       await new Promise((r) => setTimeout(r, delay));
     }
   }
@@ -365,6 +365,7 @@ async function ensureStripeColumnsOnUsers() {
     } catch (err) {
       if (err.code !== 'ER_DUP_FIELDNAME') console.warn('[server] ensureStripeColumnsOnUsers (' + name + '):', err.message);
     }
+    await new Promise((r) => setTimeout(r, 80));
   }
 }
 
@@ -375,7 +376,7 @@ async function ensureGhlTokenColumns() {
     await db.query('ALTER TABLE ghl_connections MODIFY COLUMN refresh_token TEXT DEFAULT NULL');
     console.log('[server] GHL token columns ensured (TEXT)');
   } catch (err) {
-    console.warn('[server] ensureGhlTokenColumns:', err.message);
+    if (err.code !== 'ER_NO_SUCH_TABLE') console.warn('[server] ensureGhlTokenColumns:', err.message);
   }
 }
 
@@ -384,23 +385,23 @@ const listenUrl = config.nodeEnv === 'production' && config.backendBaseUrl
   ? config.backendBaseUrl
   : `http://localhost:${PORT}`;
 
-// On npm run dev / start: create DB if missing, then create all tables that don't exist.
+// Run all migrations strictly in order so base tables always exist before dependent ones.
 (async function runStartupMigrations() {
   console.log('[server] Ensuring database and tables...');
   await ensureDatabase();
   await ensurePlansTable();
   await ensureUsersTable();
   await ensureGhlConnectionsTable();
+  console.log('[server] Base schema OK (plans, users, ghl_connections)');
   await ensureSyncedEmailsTable();
   await ensureParsedSignaturesTable();
-  await Promise.all([
-    ensureSyncLogsTable(),
-    ensureFeatureFlagsTable(),
-    ensureApiKeysTable(),
-    ensurePurchasesTable(),
-    ensureLicensesTable(),
-    ensureGhlTokenColumns(),
-  ]);
+  await ensureSyncLogsTable();
+  await ensureFeatureFlagsTable();
+  await ensureApiKeysTable();
+  await ensurePurchasesTable();
+  await ensureLicensesTable();
+  await ensureGhlTokenColumns();
+  await new Promise((r) => setTimeout(r, 100));
   await ensureLicenseCountColumn();
   await ensureStripeColumnsOnUsers();
 })().then(() => {
