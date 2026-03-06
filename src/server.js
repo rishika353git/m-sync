@@ -189,9 +189,25 @@ async function ensurePurchasesTable() {
   }
 }
 
+/** Run a function, retrying on MySQL deadlock (ER_LOCK_DEADLOCK / 1213). */
+async function withDeadlockRetry(fn, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isDeadlock = err.code === 'ER_LOCK_DEADLOCK' || err.errno === 1213;
+      if (!isDeadlock || attempt === maxRetries) throw err;
+      const delay = 50 * attempt + Math.random() * 100;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 async function ensureLicenseCountColumn() {
   try {
-    await db.query('ALTER TABLE users ADD COLUMN license_count INT NOT NULL DEFAULT 1 AFTER credits_reset_at');
+    await withDeadlockRetry(() =>
+      db.query('ALTER TABLE users ADD COLUMN license_count INT NOT NULL DEFAULT 1 AFTER credits_reset_at')
+    );
   } catch (err) {
     if (err.code !== 'ER_DUP_FIELDNAME') console.warn('[server] ensureLicenseCountColumn:', err.message);
   }
@@ -223,20 +239,17 @@ async function ensureLicensesTable() {
 }
 
 async function ensureStripeColumnsOnUsers() {
-  try {
-    await db.query('ALTER TABLE users ADD COLUMN stripe_customer_id VARCHAR(255) DEFAULT NULL');
-  } catch (err) {
-    if (err.code !== 'ER_DUP_FIELDNAME') console.warn('[server] ensureStripeColumnsOnUsers (customer_id):', err.message);
-  }
-  try {
-    await db.query('ALTER TABLE users ADD COLUMN stripe_subscription_id VARCHAR(255) DEFAULT NULL');
-  } catch (err) {
-    if (err.code !== 'ER_DUP_FIELDNAME') console.warn('[server] ensureStripeColumnsOnUsers (subscription_id):', err.message);
-  }
-  try {
-    await db.query('ALTER TABLE users ADD COLUMN subscription_status VARCHAR(50) DEFAULT NULL');
-  } catch (err) {
-    if (err.code !== 'ER_DUP_FIELDNAME') console.warn('[server] ensureStripeColumnsOnUsers (status):', err.message);
+  const alters = [
+    ['stripe_customer_id', 'ALTER TABLE users ADD COLUMN stripe_customer_id VARCHAR(255) DEFAULT NULL'],
+    ['stripe_subscription_id', 'ALTER TABLE users ADD COLUMN stripe_subscription_id VARCHAR(255) DEFAULT NULL'],
+    ['status', 'ALTER TABLE users ADD COLUMN subscription_status VARCHAR(50) DEFAULT NULL'],
+  ];
+  for (const [name, sql] of alters) {
+    try {
+      await withDeadlockRetry(() => db.query(sql));
+    } catch (err) {
+      if (err.code !== 'ER_DUP_FIELDNAME') console.warn('[server] ensureStripeColumnsOnUsers (' + name + '):', err.message);
+    }
   }
 }
 
@@ -256,16 +269,19 @@ const listenUrl = config.nodeEnv === 'production' && config.backendBaseUrl
   ? config.backendBaseUrl
   : `http://localhost:${PORT}`;
 
-Promise.all([
-  ensureSyncLogsTable(),
-  ensureFeatureFlagsTable(),
-  ensureApiKeysTable(),
-  ensurePurchasesTable(),
-  ensureLicenseCountColumn(),
-  ensureLicensesTable(),
-  ensureStripeColumnsOnUsers(),
-  ensureGhlTokenColumns(),
-]).then(() => {
+// Run user-table migrations sequentially to avoid deadlocks; others can run in parallel.
+(async function runStartupMigrations() {
+  await Promise.all([
+    ensureSyncLogsTable(),
+    ensureFeatureFlagsTable(),
+    ensureApiKeysTable(),
+    ensurePurchasesTable(),
+    ensureLicensesTable(),
+    ensureGhlTokenColumns(),
+  ]);
+  await ensureLicenseCountColumn();
+  await ensureStripeColumnsOnUsers();
+})().then(() => {
   app.listen(PORT, () => {
     console.log(`M-Sync API running on ${listenUrl}`);
     scheduleCreditsReset();
