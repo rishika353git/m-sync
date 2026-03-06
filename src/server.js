@@ -5,6 +5,7 @@
 
 const express = require('express');
 const cors = require('cors');
+const mysql = require('mysql2/promise');
 const config = require('./config');
 const db = require('./config/db');
 
@@ -101,75 +102,76 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Server error' });
 });
 
-/** Base schema: must run first on empty DB (e.g. hosting-created DB without schema.sql). */
-async function ensurePlansTable() {
+/** Create database if it doesn't exist (so npm run dev works without running db:init). */
+async function ensureDatabase() {
   try {
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS plans (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(50) NOT NULL UNIQUE,
-        slug VARCHAR(50) NOT NULL UNIQUE,
-        credits_per_month INT NOT NULL DEFAULT 0,
-        is_paid TINYINT(1) NOT NULL DEFAULT 0,
-        price_cents INT DEFAULT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      )
-    `);
-    const [rows] = await db.query('SELECT id FROM plans WHERE id = 1');
-    if (!rows || rows.length === 0) {
-      await db.query(
-        `INSERT INTO plans (id, name, slug, credits_per_month, is_paid) VALUES (1, 'Free', 'free', 50, 0)`
-      );
-    }
+    const { host, port, user, password, database } = config.db;
+    const conn = await mysql.createConnection({ host, port, user, password });
+    await conn.query(`CREATE DATABASE IF NOT EXISTS \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+    await conn.end();
   } catch (err) {
-    console.warn('[server] ensurePlansTable:', err.message);
+    // DB may already exist or user may not have CREATE DATABASE (e.g. shared hosting); continue
+    console.warn('[server] ensureDatabase (optional):', err.message);
+  }
+}
+
+/** Base schema: must run first on empty DB. Throws so startup fails if DB is missing or permissions wrong. */
+async function ensurePlansTable() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS plans (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(50) NOT NULL UNIQUE,
+      slug VARCHAR(50) NOT NULL UNIQUE,
+      credits_per_month INT NOT NULL DEFAULT 0,
+      is_paid TINYINT(1) NOT NULL DEFAULT 0,
+      price_cents INT DEFAULT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `);
+  const planRows = await db.query('SELECT id FROM plans WHERE id = 1');
+  if (!planRows || planRows.length === 0) {
+    await db.query(
+      `INSERT INTO plans (id, name, slug, credits_per_month, is_paid) VALUES (1, 'Free', 'free', 50, 0)`
+    );
   }
 }
 
 async function ensureUsersTable() {
-  try {
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        email VARCHAR(255) NOT NULL UNIQUE,
-        password_hash VARCHAR(255) NOT NULL,
-        full_name VARCHAR(255) DEFAULT NULL,
-        plan_id INT NOT NULL DEFAULT 1,
-        role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
-        credits_remaining INT NOT NULL DEFAULT 0,
-        credits_reset_at DATE DEFAULT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        FOREIGN KEY (plan_id) REFERENCES plans(id)
-      )
-    `);
-    await db.query('CREATE INDEX idx_users_email ON users(email)').catch(() => {});
-  } catch (err) {
-    console.warn('[server] ensureUsersTable:', err.message);
-  }
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      full_name VARCHAR(255) DEFAULT NULL,
+      plan_id INT NOT NULL DEFAULT 1,
+      role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
+      credits_remaining INT NOT NULL DEFAULT 0,
+      credits_reset_at DATE DEFAULT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (plan_id) REFERENCES plans(id)
+    )
+  `);
+  await db.query('CREATE INDEX idx_users_email ON users(email)').catch(() => {});
 }
 
 async function ensureGhlConnectionsTable() {
-  try {
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS ghl_connections (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        user_id INT NOT NULL UNIQUE,
-        access_token TEXT NOT NULL,
-        refresh_token TEXT DEFAULT NULL,
-        location_id VARCHAR(100) DEFAULT NULL,
-        subdomain VARCHAR(100) DEFAULT NULL,
-        token_expires_at TIMESTAMP NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-      )
-    `);
-    await db.query('CREATE INDEX idx_ghl_connections_user ON ghl_connections(user_id)').catch(() => {});
-  } catch (err) {
-    console.warn('[server] ensureGhlConnectionsTable:', err.message);
-  }
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS ghl_connections (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL UNIQUE,
+      access_token TEXT NOT NULL,
+      refresh_token TEXT DEFAULT NULL,
+      location_id VARCHAR(100) DEFAULT NULL,
+      subdomain VARCHAR(100) DEFAULT NULL,
+      token_expires_at TIMESTAMP NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+  await db.query('CREATE INDEX idx_ghl_connections_user ON ghl_connections(user_id)').catch(() => {});
 }
 
 async function ensureSyncedEmailsTable() {
@@ -382,8 +384,10 @@ const listenUrl = config.nodeEnv === 'production' && config.backendBaseUrl
   ? config.backendBaseUrl
   : `http://localhost:${PORT}`;
 
-// Run base schema first (order matters: plans → users → tables that FK to users).
+// On npm run dev / start: create DB if missing, then create all tables that don't exist.
 (async function runStartupMigrations() {
+  console.log('[server] Ensuring database and tables...');
+  await ensureDatabase();
   await ensurePlansTable();
   await ensureUsersTable();
   await ensureGhlConnectionsTable();
@@ -405,6 +409,8 @@ const listenUrl = config.nodeEnv === 'production' && config.backendBaseUrl
     scheduleCreditsReset();
   });
 }).catch((err) => {
-  console.error('Startup failed:', err);
+  console.error('Startup failed:', err.message || err);
+  if (err.code) console.error('Code:', err.code);
+  console.error('Ensure the database exists and your DB user has CREATE permission, or run: npm run db:init');
   process.exit(1);
 });
