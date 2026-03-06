@@ -17,9 +17,23 @@ else if (fs.existsSync(rootEnvAlt)) require('dotenv').config({ path: rootEnvAlt 
 if (fs.existsSync(backendEnv)) require('dotenv').config({ path: backendEnv });
 else if (fs.existsSync(backendEnvAlt)) require('dotenv').config({ path: backendEnvAlt });
 
-const corsOrigin = process.env.CORS_ORIGIN
+const baseCorsOrigin = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
-  : ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:5176', 'http://localhost:3000'];
+  : [];
+
+// Always allow common local dev origins so you can hit production API from localhost
+const localDevOrigins = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5175',
+  'http://localhost:5176',
+  'http://localhost:3000',
+  'https://phpstack-1597234-6261031.cloudwaysapps.com',
+];
+
+const corsOrigin = Array.from(
+  new Set([...baseCorsOrigin, ...localDevOrigins])
+);
 
 module.exports = {
   port: parseInt(process.env.PORT, 10) || 4000,
