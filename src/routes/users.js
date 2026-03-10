@@ -66,6 +66,72 @@ router.get('/feature-flags', async (req, res) => {
   }
 });
 
+// GET /api/users/snippets – user-defined snippets (for compose toolbar when GHL has none)
+router.get('/snippets', async (req, res) => {
+  try {
+    const rows = await db.query('SELECT id, name, body, created_at FROM user_snippets WHERE user_id = ? ORDER BY name', [req.user.id]);
+    res.json({ snippets: rows || [] });
+  } catch (err) {
+    console.error('Snippets list error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/users/snippets – add user snippet
+router.post('/snippets', async (req, res) => {
+  try {
+    const { name, body } = req.body || {};
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      return res.status(400).json({ error: 'name required' });
+    }
+    const r = await db.query(
+      'INSERT INTO user_snippets (user_id, name, body) VALUES (?, ?, ?)',
+      [req.user.id, String(name).trim().slice(0, 200), typeof body === 'string' ? body : '']
+    );
+    res.status(201).json({ id: r.insertId, name: String(name).trim(), body: typeof body === 'string' ? body : '' });
+  } catch (err) {
+    console.error('Snippet add error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE /api/users/snippets/:id
+router.delete('/snippets/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id || Number.isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+    const [rows] = await db.query('DELETE FROM user_snippets WHERE id = ? AND user_id = ?', [id, req.user.id]);
+    if (!rows?.affectedRows) return res.status(404).json({ error: 'Snippet not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Snippet delete error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/users/meeting-link
+router.get('/meeting-link', async (req, res) => {
+  try {
+    const [row] = await db.query('SELECT meeting_link FROM users WHERE id = ?', [req.user.id]);
+    res.json({ meetingLink: row?.meeting_link || null });
+  } catch (err) {
+    console.error('Meeting link get error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/users/meeting-link
+router.put('/meeting-link', async (req, res) => {
+  try {
+    const link = typeof req.body?.meetingLink === 'string' ? req.body.meetingLink.trim().slice(0, 500) : '';
+    await db.query('UPDATE users SET meeting_link = ? WHERE id = ?', [link || null, req.user.id]);
+    res.json({ meetingLink: link || null });
+  } catch (err) {
+    console.error('Meeting link put error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // GET /api/users/synced-emails – list emails synced to CRM by this user only (never other users')
 router.get('/synced-emails', async (req, res) => {
   try {

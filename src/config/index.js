@@ -28,7 +28,7 @@ const localDevOrigins = [
   'http://localhost:5175',
   'http://localhost:5176',
   'http://localhost:3000',
-  'https://phpstack-1597234-6261031.cloudwaysapps.com',
+  'https://phpstack-1598623-6267058.cloudwaysapps.com',
 ];
 
 const corsOrigin = Array.from(

@@ -172,7 +172,21 @@ ALTER TABLE users ADD COLUMN stripe_subscription_id VARCHAR(255) DEFAULT NULL;
 ALTER TABLE users ADD COLUMN subscription_status VARCHAR(50) DEFAULT NULL;
 
 -- -----------------------------------------------------------------------------
--- 4) GHL token columns as TEXT (tokens can exceed 512 chars)
+-- 4) User snippets + meeting link (compose toolbar fallbacks when CRM has none)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS user_snippets (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  name VARCHAR(200) NOT NULL,
+  body TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  KEY idx_user_snippets_user (user_id)
+);
+ALTER TABLE users ADD COLUMN meeting_link VARCHAR(500) DEFAULT NULL;
+
+-- -----------------------------------------------------------------------------
+-- 5) GHL token columns as TEXT (tokens can exceed 512 chars)
 -- -----------------------------------------------------------------------------
 ALTER TABLE ghl_connections MODIFY COLUMN access_token TEXT NOT NULL;
 ALTER TABLE ghl_connections MODIFY COLUMN refresh_token TEXT DEFAULT NULL;

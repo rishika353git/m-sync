@@ -320,8 +320,10 @@ async function withDeadlockRetry(fn, maxRetries = 6) {
 }
 
 async function columnExists(table, column) {
-  const rows = await db.query(`SHOW COLUMNS FROM ${table} LIKE ?`, [column]);
-  return Array.isArray(rows) && rows.length > 0;
+  const safeTable = String(table).replace(/[^a-zA-Z0-9_]/g, '');
+  const safeColumn = String(column).replace(/[^a-zA-Z0-9_]/g, '');
+  const rows = await db.query(`SHOW COLUMNS FROM \`${safeTable}\``);
+  return Array.isArray(rows) && rows.some((r) => (r.Field || r.field) === safeColumn);
 }
 
 async function ensureLicenseCountColumn() {
@@ -357,6 +359,35 @@ async function ensureLicensesTable() {
     `);
   } catch (err) {
     console.warn('[server] ensureLicensesTable:', err.message);
+  }
+}
+
+async function ensureUserSnippetsTable() {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS user_snippets (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        name VARCHAR(200) NOT NULL,
+        body TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        KEY idx_user_snippets_user (user_id)
+      )
+    `);
+  } catch (err) {
+    console.warn('[server] ensureUserSnippetsTable:', err.message);
+  }
+}
+
+async function ensureMeetingLinkColumn() {
+  try {
+    if (await columnExists('users', 'meeting_link')) return;
+    await withDeadlockRetry(() =>
+      db.query('ALTER TABLE users ADD COLUMN meeting_link VARCHAR(500) DEFAULT NULL')
+    );
+  } catch (err) {
+    if (err.code !== 'ER_DUP_FIELDNAME') console.warn('[server] ensureMeetingLinkColumn:', err.message);
   }
 }
 
@@ -411,9 +442,11 @@ const listenUrl = config.nodeEnv === 'production' && config.backendBaseUrl
   await ensureApiKeysTable();
   await ensurePurchasesTable();
   await ensureLicensesTable();
+  await ensureUserSnippetsTable();
   await ensureGhlTokenColumns();
   await new Promise((r) => setTimeout(r, 100));
   await ensureLicenseCountColumn();
+  await ensureMeetingLinkColumn();
   await ensureStripeColumnsOnUsers();
 })().then(() => {
   app.listen(PORT, () => {

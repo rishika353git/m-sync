@@ -883,38 +883,52 @@ router.get('/templates', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/ghl/snippets – list snippets/canned responses from CRM (GHL may not have endpoint; return empty if 404)
+// GET /api/ghl/snippets – list snippets from CRM (GHL) + user-defined (merged)
 router.get('/snippets', requireAuth, async (req, res) => {
   try {
+    let snippets = [];
     const { accessToken: token, locationId } = await ghlTokenService.getValidToken(req.user.id).catch(() => ({}));
-    if (!token || !locationId) return res.json({ snippets: [] });
-    const r = await ghlFetch(
-      `https://services.leadconnectorhq.com/locations/${locationId}/snippets`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (r.status === 404 || !r.ok) return res.json({ snippets: [] });
-    const data = await r.json().catch(() => ({}));
-    const list = data?.snippets ?? data?.data ?? data;
-    return res.json({ snippets: Array.isArray(list) ? list : [] });
+    if (token && locationId) {
+      const r = await ghlFetch(
+        `https://services.leadconnectorhq.com/locations/${locationId}/snippets`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (r.ok && r.status !== 404) {
+        const data = await r.json().catch(() => ({}));
+        const list = data?.snippets ?? data?.data ?? data;
+        snippets = Array.isArray(list) ? list.map((s) => ({ name: s.name ?? s.title ?? s.id, body: s.body ?? s.content ?? s.text ?? '' })) : [];
+      }
+    }
+    const userRows = await db.query('SELECT id, name, body FROM user_snippets WHERE user_id = ? ORDER BY name', [req.user.id]);
+    const userSnippets = (userRows || []).map((s) => ({ id: s.id, name: s.name, body: s.body || '' }));
+    snippets = [...snippets, ...userSnippets];
+    return res.json({ snippets });
   } catch (_) {
     return res.json({ snippets: [] });
   }
 });
 
-// GET /api/ghl/meeting-link – default meeting/calendar link from CRM (if GHL exposes it)
+// GET /api/ghl/meeting-link – default meeting link from CRM (GHL) or user-defined
 router.get('/meeting-link', requireAuth, async (req, res) => {
   try {
+    let meetingLink = null;
     const { accessToken: token, locationId } = await ghlTokenService.getValidToken(req.user.id).catch(() => ({}));
-    if (!token || !locationId) return res.json({ meetingLink: null });
-    const r = await ghlFetch(
-      `https://services.leadconnectorhq.com/locations/${locationId}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (!r.ok) return res.json({ meetingLink: null });
-    const data = await r.json().catch(() => ({}));
-    const loc = data?.location ?? data;
-    const link = loc?.meetingLink ?? loc?.calendarLink ?? loc?.bookingUrl ?? loc?.defaultMeetingUrl ?? null;
-    return res.json({ meetingLink: link || null });
+    if (token && locationId) {
+      const r = await ghlFetch(
+        `https://services.leadconnectorhq.com/locations/${locationId}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (r.ok) {
+        const data = await r.json().catch(() => ({}));
+        const loc = data?.location ?? data;
+        meetingLink = loc?.meetingLink ?? loc?.calendarLink ?? loc?.bookingUrl ?? loc?.defaultMeetingUrl ?? null;
+      }
+    }
+    if (!meetingLink) {
+      const [row] = await db.query('SELECT meeting_link FROM users WHERE id = ?', [req.user.id]);
+      meetingLink = row?.meeting_link || null;
+    }
+    return res.json({ meetingLink: meetingLink || null });
   } catch (_) {
     return res.json({ meetingLink: null });
   }
